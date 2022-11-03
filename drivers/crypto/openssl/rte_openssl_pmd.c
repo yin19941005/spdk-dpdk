@@ -2738,54 +2738,57 @@ process_op(struct openssl_qp *qp, struct rte_crypto_op *op,
 	struct rte_mbuf *msrc, *mdst;
 	int retval;
 
-	msrc = op->sym->m_src;
-	mdst = op->sym->m_dst ? op->sym->m_dst : op->sym->m_src;
+	// Skip the operation if already success and just re-enqueue
+	if (op->status != RTE_CRYPTO_OP_STATUS_SUCCESS)	{
+		msrc = op->sym->m_src;
+		mdst = op->sym->m_dst ? op->sym->m_dst : op->sym->m_src;
 
-	op->status = RTE_CRYPTO_OP_STATUS_NOT_PROCESSED;
+		op->status = RTE_CRYPTO_OP_STATUS_NOT_PROCESSED;
 
-	switch (sess->chain_order) {
-	case OPENSSL_CHAIN_ONLY_CIPHER:
-		process_openssl_cipher_op(op, sess, msrc, mdst);
-		break;
-	case OPENSSL_CHAIN_ONLY_AUTH:
-		process_openssl_auth_op(qp, op, sess, msrc, mdst);
-		break;
-	case OPENSSL_CHAIN_CIPHER_AUTH:
-		process_openssl_cipher_op(op, sess, msrc, mdst);
-		/* OOP */
-		if (msrc != mdst)
-			copy_plaintext(msrc, mdst, op);
-		process_openssl_auth_op(qp, op, sess, mdst, mdst);
-		break;
-	case OPENSSL_CHAIN_AUTH_CIPHER:
-		process_openssl_auth_op(qp, op, sess, msrc, mdst);
-		process_openssl_cipher_op(op, sess, msrc, mdst);
-		break;
-	case OPENSSL_CHAIN_COMBINED:
-		process_openssl_combined_op(op, sess, msrc, mdst);
-		break;
-	case OPENSSL_CHAIN_CIPHER_BPI:
-		process_openssl_docsis_bpi_op(op, sess, msrc, mdst);
-		break;
-	default:
-		op->status = RTE_CRYPTO_OP_STATUS_ERROR;
-		break;
+		switch (sess->chain_order) {
+		case OPENSSL_CHAIN_ONLY_CIPHER:
+			process_openssl_cipher_op(op, sess, msrc, mdst);
+			break;
+		case OPENSSL_CHAIN_ONLY_AUTH:
+			process_openssl_auth_op(qp, op, sess, msrc, mdst);
+			break;
+		case OPENSSL_CHAIN_CIPHER_AUTH:
+			process_openssl_cipher_op(op, sess, msrc, mdst);
+			/* OOP */
+			if (msrc != mdst)
+				copy_plaintext(msrc, mdst, op);
+			process_openssl_auth_op(qp, op, sess, mdst, mdst);
+			break;
+		case OPENSSL_CHAIN_AUTH_CIPHER:
+			process_openssl_auth_op(qp, op, sess, msrc, mdst);
+			process_openssl_cipher_op(op, sess, msrc, mdst);
+			break;
+		case OPENSSL_CHAIN_COMBINED:
+			process_openssl_combined_op(op, sess, msrc, mdst);
+			break;
+		case OPENSSL_CHAIN_CIPHER_BPI:
+			process_openssl_docsis_bpi_op(op, sess, msrc, mdst);
+			break;
+		default:
+			op->status = RTE_CRYPTO_OP_STATUS_ERROR;
+			break;
+		}
+
+		/* Free session if a session-less crypto op */
+		if (op->sess_type == RTE_CRYPTO_OP_SESSIONLESS) {
+			openssl_reset_session(sess);
+			memset(sess, 0, sizeof(struct openssl_session));
+			memset(op->sym->session, 0,
+				rte_cryptodev_sym_get_existing_header_session_size(
+					op->sym->session));
+			rte_mempool_put(qp->sess_mp_priv, sess);
+			rte_mempool_put(qp->sess_mp, op->sym->session);
+			op->sym->session = NULL;
+		}
+
+		if (op->status == RTE_CRYPTO_OP_STATUS_NOT_PROCESSED)
+			op->status = RTE_CRYPTO_OP_STATUS_SUCCESS;
 	}
-
-	/* Free session if a session-less crypto op */
-	if (op->sess_type == RTE_CRYPTO_OP_SESSIONLESS) {
-		openssl_reset_session(sess);
-		memset(sess, 0, sizeof(struct openssl_session));
-		memset(op->sym->session, 0,
-			rte_cryptodev_sym_get_existing_header_session_size(
-				op->sym->session));
-		rte_mempool_put(qp->sess_mp_priv, sess);
-		rte_mempool_put(qp->sess_mp, op->sym->session);
-		op->sym->session = NULL;
-	}
-
-	if (op->status == RTE_CRYPTO_OP_STATUS_NOT_PROCESSED)
-		op->status = RTE_CRYPTO_OP_STATUS_SUCCESS;
 
 	if (op->status != RTE_CRYPTO_OP_STATUS_ERROR)
 		retval = rte_ring_enqueue(qp->processed_ops, (void *)op);
